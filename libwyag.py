@@ -15,6 +15,16 @@ argparser = argparse.ArgumentParser(description="Version control")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
 argsubparsers.required = True
 
+# Subparser for init
+argsp = argsubparsers.add_parser("init", help="Initialize a new, empty repository.")
+argsp.add_argument(
+    "path",
+    metavar="directory",
+    nargs="?",
+    default=".",
+    help="Where to create the repository.",
+)
+
 
 # From the first one, so we skip the "wyag" command
 def main(argv=sys.argv[1:]):
@@ -81,6 +91,33 @@ class GitRepository(object):
                 raise Exception("Unsupported repositoryformatversion %s" % version)
 
 
+class GitObject(object):
+    def __init__(self, data=None) -> None:
+        if data != None:
+            self.deserialize(data)
+        else:
+            self.init()
+
+    def serialize(self, repo: GitRepository):
+        raise NotImplementedError()
+
+    def deserialize(self, data):
+        raise NotImplementedError()
+
+    def init(self):
+        pass
+
+
+def GitBlob(GitObject):
+    fmt = b"blob"
+
+    def serialize(self):
+        return self.blobdata
+
+    def deserialize(self, data):
+        self.blobdata = data
+
+
 def repo_path(repo, *path):
     return os.path.join(repo.gitdir, *path)
 
@@ -107,7 +144,7 @@ def repo_file(repo, *path, mkdir=False):
         return repo_path(repo, *path)
 
 
-def create_repo(path) -> GitRepository:
+def repo_create(path) -> GitRepository:
     repo = GitRepository(path, force=True)
 
     # Make sure the path either doesn't exist or is an empty dir.
@@ -145,11 +182,102 @@ def repo_default_config() -> configparser.ConfigParser:
     ret = configparser.ConfigParser()
 
     ret.add_section("core")
-    # the version of the gitdir format. 0 means the initial format, 1 the same with extensions
+    # The version of the gitdir format. 0 means the initial format, 1 the same with extensions
     ret.set("core", "repositoryformatversion", "0")
-    # disable tracking of file mode (permissions) changes in the work tree
+    # Disable tracking of file mode (permissions) changes in the work tree
     ret.set("core", "filemode", "false")
-    # indicates that this repository has a worktree
+    # Indicates that this repository has a worktree
     ret.set("core", "bare", "false")
 
     return ret
+
+
+def cmd_init(args):
+    repo_create(args)
+
+
+# Find the root of current repository (where's the file .git is present)
+def repo_find(path=".", required=True) -> GitRepository:
+    path = os.path.realpath(path)
+
+    if os.path.isdir(os.path.join(path, ".git")):
+        return GitRepository(path)
+
+    # If we haven't returned, recurse in parent, if w
+    parent = os.path.relpath(os.path.join(path, ".."))
+
+    if parent == path:
+        # Bottom case
+        # os.path.join("/", "..") == "/":
+        # If parent==path, then path is root
+        if required:
+            raise Exception("No git directory.")
+        else:
+            return None
+
+    # Recursive case
+    return repo_find(parent, required)
+
+
+def object_read(repo: GitRepository, sha) -> GitObject:
+    """Read object sha from Git repository repo.  Return a
+    GitObject whose exact type depends on the object.
+
+    The path (inside the gitdir) is composed from the "objects" directory,
+    then a folder with the first two charactes of the file name, then the file name.
+
+    Object name: e673d1b7eaa0aa01b5bc2442d570a765bdaae751
+    Path to object: .git/objects/e6/e673d1b7eaa0aa01b5bc2442d570a765bdaae751
+    """
+    path = repo_file(repo, "objects", sha[0:2], sha[2:])
+
+    if not os.path.isfile(path):
+        return None
+
+    # To read a binary file
+    with open(path, "rb") as f:
+        raw = zlib.decompress(f.read())
+
+        # Read object type (from 0 to " ")
+        x = raw.find(b" ")
+        fmt = raw[0:x]
+
+        # Read and validate object size (x00 = null)
+        y = raw.find(b"\x00", x)
+        size = int(raw[x:y].decode("ascii"))
+        if size != len(raw) - y - 1:
+            raise Exception("Malformed object {0}: bad length", format(sha))
+
+        # Pick constructor
+        match fmt:
+            case b"commit":
+                c = GitCommit
+            case b"tree":
+                c = GitTree
+            case b"tag":
+                c = GitTag
+            case b"blob":
+                c = GitBlob
+            case _:
+                raise Exception(
+                    "Unkwown type {0} for object {1}", format(fmt.decode("ascii"), sha)
+                )
+
+        # Call constructor (without the header) and return object
+        return c(raw[y + 1 :])
+
+
+def object_write(object: GitObject, repo: GitRepository = None) -> str:
+    data = object.serialize()
+    # Add header
+    result = object.fmt + b" " + str(len(data)).encode + b"\x00" + data
+    # Compute hash
+    sha = hashlib.sha1(result).hexdigest()
+
+    if repo:
+        path = repo_file(repo, "objects", sha[0:2], sha[2:], mkdir=True)
+
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(zlib.compress(result))
+    return sha
