@@ -182,6 +182,19 @@ class GitCommit(GitObject):
         self.kvlm = dict()
 
 
+class GitTag(GitObject):
+    fmt = b"tag"
+
+    def serialize(self, repo: GitRepository):
+        return super().serialize(repo)
+
+    def deserialize(self, data):
+        return super().deserialize(data)
+
+    def init(self):
+        return super().init()
+
+
 class GitTree(GitObject):
     fmt = b"tree"
 
